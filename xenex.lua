@@ -1,0 +1,910 @@
+-- ========================================================================
+-- XANAX.WTF — Version-e7d81637d42c4b23 — FULLY REVITALIZED
+-- ========================================================================
+-- [[ META: THIS SCRIPT USES ADVANCED REVERSE-ENGINEERED TECHNIQUES ]]
+-- [[ ALL FEATURES: Silent Aim, Triggerbot, Camlock, ESP, Spread,       ]]
+-- [[ Rapid Fire, Infinite Range, Super Jump, Snapline, Hitbox Expander, ]]
+-- [[ Spiderman, Speed, FOV Circles, Status GUI, and Keybinds.          ]]
+-- ========================================================================
+
+local Config = shared.Xanax
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+-- ========== STATE VARIABLES ==========
+local currentTarget = nil
+local isLocking = false
+local triggerEnabled = false
+local silentFovCircle = nil
+local camlockFovCircle = nil
+local espLabels = {}
+local SpeedEnabled = false
+local BaseSpeed = 16
+local lastVisibleTarget = nil
+local lastTriggerClick = 0
+local superJumpActive = false
+local camlockEnabled = false
+local camlockTarget = nil
+local snaplineDrawing = nil
+local rapidFireActive = false
+local infRangeActive = false
+local lastJumpTime = 0
+local deltaTime = 0.016 -- assume 60fps
+
+-- ========== HELPER FUNCTIONS (OPTIMIZED) ==========
+local function isPlayerKnockedOrKO(player)
+    if not Config['Settings']['Knock Check'] then return false end
+    local char = player.Character
+    if char then
+        local bodyEffects = char:FindFirstChild("BodyEffects")
+        if bodyEffects then
+            local ko = bodyEffects:FindFirstChild("K.O")
+            if ko and ko.Value == true then return true end
+            local knocked = bodyEffects:FindFirstChild("Knocked")
+            if knocked and knocked.Value == true then return true end
+        end
+    end
+    return false
+end
+
+local function isSelfKnocked()
+    local char = LocalPlayer.Character
+    if char then
+        local bodyEffects = char:FindFirstChild("BodyEffects")
+        if bodyEffects then
+            local ko = bodyEffects:FindFirstChild("K.O")
+            if ko and ko.Value == true then return true end
+            local knocked = bodyEffects:FindFirstChild("Knocked")
+            if knocked and knocked.Value == true then return true end
+        end
+    end
+    return false
+end
+
+local function canSeeTarget(part)
+    if not Config['Settings']['Visible Check'] then return true end
+    if not part or not part.Parent then return false end
+    local character = part.Parent
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+    local state = humanoid:GetState()
+    local isAirborne = (state == Enum.HumanoidStateType.Jumping or
+                        state == Enum.HumanoidStateType.Freefall or
+                        state == Enum.HumanoidStateType.FallingDown)
+    local root = character:FindFirstChild("HumanoidRootPart")
+    local velY = root and math.abs((root.AssemblyLinearVelocity or root.Velocity or Vector3.new()).Y) or 0
+    if (isAirborne or velY > 8) and isLocking then
+        return true
+    end
+    local origin = Camera.CFrame.Position
+    local direction = (part.Position - origin).Unit * (part.Position - origin).Magnitude
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {LocalPlayer.Character, character}
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    raycastParams.IgnoreWater = true
+    local rayResult = Workspace:Raycast(origin, direction, raycastParams)
+    return rayResult == nil or rayResult.Instance:IsDescendantOf(character)
+end
+
+local function getClosestBodyPart(character)
+    local closestPart = nil
+    local shortestDist = math.huge
+    local bodyParts = {
+        character:FindFirstChild("Head"),
+        character:FindFirstChild("UpperTorso"),
+        character:FindFirstChild("HumanoidRootPart"),
+        character:FindFirstChild("LowerTorso"),
+        character:FindFirstChild("LeftUpperArm"),
+        character:FindFirstChild("RightUpperArm"),
+        character:FindFirstChild("LeftLowerArm"),
+        character:FindFirstChild("RightLowerArm"),
+        character:FindFirstChild("LeftHand"),
+        character:FindFirstChild("RightHand"),
+        character:FindFirstChild("LeftUpperLeg"),
+        character:FindFirstChild("RightUpperLeg"),
+        character:FindFirstChild("LeftLowerLeg"),
+        character:FindFirstChild("RightLowerLeg"),
+        character:FindFirstChild("LeftFoot"),
+        character:FindFirstChild("RightFoot"),
+    }
+    for _, part in pairs(bodyParts) do
+        if part then
+            local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
+            if onScreen and pos.Z > 0 then
+                local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+                local dist = (Vector2.new(pos.X, pos.Y) - screenCenter).Magnitude
+                if dist < shortestDist then
+                    shortestDist = dist
+                    closestPart = part
+                end
+            end
+        end
+    end
+    return closestPart
+end
+
+local function isMouseInCircleFOV(radius)
+    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    return (mousePos - screenCenter).Magnitude <= radius
+end
+
+-- ========== TARGET FINDERS ==========
+local function findClosestTarget()
+    local closestTarget = nil
+    local shortestDistance = math.huge
+    local fovConfig = Config['Silent Aim FOV']
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            if not isPlayerKnockedOrKO(player) then
+                local targetPart = nil
+                if Config['Silent Aim']['Hit Part'] == 'Closest Part' then
+                    targetPart = getClosestBodyPart(player.Character)
+                else
+                    targetPart = player.Character:FindFirstChild(Config['Silent Aim']['Hit Part'])
+                end
+                if targetPart and canSeeTarget(targetPart) then
+                    local pos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                    if onScreen and pos.Z > 0 then
+                        if fovConfig.Enabled and not isMouseInCircleFOV(fovConfig.Radius) then
+                            -- skip
+                        else
+                            local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+                            local dist = (Vector2.new(pos.X, pos.Y) - screenCenter).Magnitude
+                            if dist < shortestDistance then
+                                shortestDistance = dist
+                                closestTarget = targetPart
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closestTarget
+end
+
+local function findCamlockTarget()
+    local mousePos = Vector2.new(Mouse.X, Mouse.Y)
+    local bestPlayer, bestDist = nil, math.huge
+    local fovConfig = Config['Camera Lock FOV']
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            if not isPlayerKnockedOrKO(player) then
+                local part = player.Character:FindFirstChild("HumanoidRootPart")
+                if part and canSeeTarget(part) then
+                    if fovConfig.Enabled and not isMouseInCircleFOV(fovConfig.Radius) then
+                        -- skip
+                    else
+                        local screenPos = Camera:WorldToViewportPoint(part.Position)
+                        if screenPos and screenPos.Z > 0 then
+                            local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                            if dist < bestDist then
+                                bestDist = dist
+                                bestPlayer = player
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return bestPlayer
+end
+
+local function getPredictedPosition(part, config)
+    if not config['Use Prediction'] then return part.Position end
+    local velocity = part.AssemblyLinearVelocity or part.Velocity or Vector3.new(0, 0, 0)
+    local prediction = config['Prediction']
+    if type(prediction) == "table" then
+        local predX = prediction['X'] or 0.133
+        local predY = prediction['Y'] or 0.133
+        local predZ = prediction['Z'] or 0.133
+        return part.Position + Vector3.new(velocity.X * predX, velocity.Y * predY, velocity.Z * predZ)
+    else
+        if prediction == 0 then prediction = 0.1245 end
+        return part.Position + (velocity * prediction)
+    end
+end
+
+-- ========== CAMERA LOCK (SMOOTHED) ==========
+local function applyCameraLock()
+    if not camlockEnabled then return end
+    if not Config['Camera Lock']['Enabled'] then return end
+    if isSelfKnocked() then
+        camlockTarget = nil
+        return
+    end
+    if camlockTarget then
+        local char = camlockTarget.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum or hum.Health <= 0 or isPlayerKnockedOrKO(camlockTarget) then
+            camlockTarget = nil
+        end
+    end
+    if not camlockTarget then
+        camlockTarget = findCamlockTarget()
+    end
+    if not camlockTarget then return end
+
+    local part = camlockTarget.Character:FindFirstChild("HumanoidRootPart")
+    if not part then return end
+
+    local targetPos = getPredictedPosition(part, Config['Camera Lock'])
+    local camCF = Camera.CFrame
+    local targetCF = CFrame.new(camCF.Position, targetPos)
+    local smooth = Config['Camera Lock']['Smoothing']
+    local alpha = 1 - math.exp(-deltaTime * smooth)
+    Camera.CFrame = camCF:Lerp(targetCF, math.min(alpha, 1))
+end
+
+-- ========== DRAWING OBJECTS (CIRCLES) ==========
+if not silentFovCircle then
+    silentFovCircle = Drawing.new("Circle")
+    silentFovCircle.Visible = false
+    silentFovCircle.Thickness = Config['Silent Aim FOV']['Thickness']
+    silentFovCircle.Color = Config['Silent Aim FOV']['Color']
+    silentFovCircle.Filled = false
+    silentFovCircle.NumSides = 100
+    silentFovCircle.Radius = Config['Silent Aim FOV']['Radius']
+    silentFovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    silentFovCircle.ZIndex = 999
+end
+
+if not camlockFovCircle then
+    camlockFovCircle = Drawing.new("Circle")
+    camlockFovCircle.Visible = false
+    camlockFovCircle.Thickness = Config['Camera Lock FOV']['Thickness']
+    camlockFovCircle.Color = Config['Camera Lock FOV']['Color']
+    camlockFovCircle.Filled = false
+    camlockFovCircle.NumSides = 100
+    camlockFovCircle.Radius = Config['Camera Lock FOV']['Radius']
+    camlockFovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    camlockFovCircle.ZIndex = 999
+end
+
+local function updateFOVCircles()
+    local silentCfg = Config['Silent Aim FOV']
+    if silentCfg.Enabled and silentCfg.Visible then
+        silentFovCircle.Visible = true
+        silentFovCircle.Radius = silentCfg.Radius
+        silentFovCircle.Color = silentCfg.Color
+        silentFovCircle.Thickness = silentCfg.Thickness
+        silentFovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    else
+        silentFovCircle.Visible = false
+    end
+
+    local camCfg = Config['Camera Lock FOV']
+    if camCfg.Enabled and camCfg.Visible then
+        camlockFovCircle.Visible = true
+        camlockFovCircle.Radius = camCfg.Radius
+        camlockFovCircle.Color = camCfg.Color
+        camlockFovCircle.Thickness = camCfg.Thickness
+        camlockFovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    else
+        camlockFovCircle.Visible = false
+    end
+end
+
+-- ========== TRIGGERBOT (ENHANCED) ==========
+local function TriggerBot()
+    if not Config['Trigger Bot']['Enabled'] then return end
+    if not triggerEnabled then return end
+    if tick() - lastTriggerClick < Config['Trigger Bot']['Delay'] then return end
+    if not currentTarget then return end
+    local character = currentTarget.Parent
+    if not character then return end
+    local player = Players:GetPlayerFromCharacter(character)
+    if not player then return end
+    if isPlayerKnockedOrKO(player) then return end
+    if not canSeeTarget(currentTarget) then return end
+    if Config['Silent Aim FOV']['Enabled'] and not isMouseInCircleFOV(Config['Silent Aim FOV']['Radius']) then
+        return
+    end
+    local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    if Config['Trigger Bot']['Specific Weapons']['Enabled'] then
+        local weaponValid = false
+        for _, weaponName in pairs(Config['Trigger Bot']['Specific Weapons']['Weapons']) do
+            local cleanName = weaponName:gsub("%[", ""):gsub("%]", "")
+            if tool.Name == weaponName or tool.Name:find(cleanName) then
+                weaponValid = true
+                break
+            end
+        end
+        if not weaponValid then return end
+    end
+    -- Primary activation
+    tool:Activate()
+    -- Fallback: simulate mouse click for weapons that require it
+    UserInputService.InputBegan:Fire(
+        Instance.new("InputObject", nil),
+        Enum.UserInputType.MouseButton1
+    )
+    lastTriggerClick = tick()
+end
+
+-- ========== METATABLE HOOK (SILENT AIM + SPREAD) ==========
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+local oldNewIndex = mt.__newindex
+setreadonly(mt, false)
+
+-- Override __index for Mouse objects (Silent Aim)
+mt.__index = function(self, key)
+    if not checkcaller() and self:IsA("Mouse") then
+        if key == "Hit" or key == "Target" then
+            if Config['Silent Aim']['Enabled'] and currentTarget then
+                local char = currentTarget.Parent
+                if char then
+                    local player = Players:GetPlayerFromCharacter(char)
+                    if player and not isPlayerKnockedOrKO(player) and canSeeTarget(currentTarget) then
+                        if Config['Silent Aim FOV']['Enabled'] and not isMouseInCircleFOV(Config['Silent Aim FOV']['Radius']) then
+                            -- outside FOV, fallback to original
+                        else
+                            if key == "Hit" then
+                                local hitPos = getPredictedPosition(currentTarget, Config['Silent Aim'])
+                                return CFrame.new(hitPos)
+                            else
+                                return currentTarget
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return oldIndex(self, key)
+end
+
+-- Override __newindex for Random objects (Spread)
+mt.__newindex = function(self, key, value)
+    if not checkcaller() and self:IsA("Random") and key == "NextNumber" then
+        -- We'll hook via a separate method below
+    end
+    return oldNewIndex(self, key, value)
+end
+
+setreadonly(mt, true)
+
+-- ========== SPREAD HOOK (via Random instance) ==========
+local globalRandom = Random.new()
+local oldNextNumber = globalRandom.NextNumber
+globalRandom.NextNumber = function(self, min, max)
+    if not checkcaller() then
+        if Config['Spread']['Enabled'] then
+            if Config['Spread']['Specific Weapons']['Enabled'] then
+                local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+                if tool then
+                    local weaponName = tool.Name
+                    local foundWeapon = false
+                    for _, weapon in pairs(Config['Spread']['Specific Weapons']['Weapons']) do
+                        if weaponName == weapon then
+                            foundWeapon = true
+                            break
+                        end
+                    end
+                    if foundWeapon then
+                        return oldNextNumber(self, min, max) * (Config['Spread']['Amount'] / 100)
+                    end
+                end
+            else
+                return oldNextNumber(self, min, max) * (Config['Spread']['Amount'] / 100)
+            end
+        end
+    end
+    return oldNextNumber(self, min, max)
+end
+
+-- ========== ESP (ENHANCED) ==========
+local function addESPToPlayer(player)
+    if player == LocalPlayer then return end
+    local esp = {
+        player = player,
+        nameTag = Drawing.new("Text"),
+    }
+    esp.nameTag.Size = 14
+    esp.nameTag.Center = true
+    esp.nameTag.Outline = true
+    esp.nameTag.OutlineColor = Color3.fromRGB(0, 0, 0)
+    esp.nameTag.Color = Config['Visual Awareness']['Color']
+    esp.nameTag.Visible = false
+    esp.nameTag.ZIndex = 1000
+    espLabels[player.UserId] = esp
+end
+
+local function removeESPFromPlayer(player)
+    local esp = espLabels[player.UserId]
+    if esp then
+        esp.nameTag:Remove()
+        espLabels[player.UserId] = nil
+    end
+end
+
+local function refreshESP()
+    if not Config['Visual Awareness']['Enabled'] then
+        for _, esp in pairs(espLabels) do
+            esp.nameTag.Visible = false
+        end
+        return
+    end
+    for userId, esp in pairs(espLabels) do
+        local player = esp.player
+        if not player or not player.Parent then
+            esp.nameTag.Visible = false
+            esp.nameTag:Remove()
+            espLabels[userId] = nil
+            continue
+        end
+        if player.Character and player.Character.Parent and player.Character:FindFirstChild("HumanoidRootPart") and player.Character:FindFirstChild("Head") then
+            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+            if not humanoid or humanoid.Health <= 0 then
+                esp.nameTag.Visible = false
+                continue
+            end
+            local rootPart = player.Character.HumanoidRootPart
+            local legPos, onScreen = Camera:WorldToViewportPoint(rootPart.Position - Vector3.new(0, 3, 0))
+            if onScreen and legPos.Z > 0 then
+                esp.nameTag.Position = Vector2.new(legPos.X, legPos.Y + 15)
+                if player.DisplayName and player.DisplayName ~= "" then
+                    esp.nameTag.Text = player.DisplayName
+                else
+                    esp.nameTag.Text = player.Name
+                end
+                if currentTarget and currentTarget.Parent == player.Character then
+                    esp.nameTag.Color = Config['Visual Awareness']['Target Color']
+                else
+                    esp.nameTag.Color = Config['Visual Awareness']['Color']
+                end
+                esp.nameTag.Visible = true
+            else
+                esp.nameTag.Visible = false
+            end
+        else
+            esp.nameTag.Visible = false
+        end
+    end
+end
+
+-- Initialize ESP for existing players
+for _, player in pairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        addESPToPlayer(player)
+        player.CharacterAdded:Connect(function(char)
+            removeESPFromPlayer(player)
+            char:WaitForChild("HumanoidRootPart")
+            task.wait(0.1)
+            addESPToPlayer(player)
+        end)
+        player.CharacterRemoving:Connect(function()
+            removeESPFromPlayer(player)
+        end)
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    if player ~= LocalPlayer then
+        player.CharacterAdded:Connect(function(char)
+            removeESPFromPlayer(player)
+            char:WaitForChild("HumanoidRootPart")
+            task.wait(0.1)
+            addESPToPlayer(player)
+        end)
+        player.CharacterRemoving:Connect(function()
+            removeESPFromPlayer(player)
+        end)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    removeESPFromPlayer(player)
+end)
+
+-- ========== SUPER JUMP (FIXED COOLDOWN) ==========
+RunService.Stepped:Connect(function()
+    if not Config['Super Jump']['Enabled'] then return end
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not rootPart then return end
+    local holdingB = UserInputService:IsKeyDown(Enum.KeyCode[Config['Keybinds']['Super Jump']])
+    if holdingB and (humanoid:GetState() == Enum.HumanoidStateType.Landed or humanoid.FloorMaterial ~= Enum.Material.Air) then
+        if tick() - lastJumpTime >= Config['Super Jump']['Cooldown'] then
+            rootPart.Velocity = Vector3.new(
+                rootPart.Velocity.X,
+                Config['Super Jump']['Power'],
+                rootPart.Velocity.Z
+            )
+            lastJumpTime = tick()
+        end
+    end
+end)
+
+-- ========== SNAPLINE ==========
+if not snaplineDrawing then
+    snaplineDrawing = Drawing.new("Line")
+    snaplineDrawing.Visible = false
+    snaplineDrawing.Thickness = Config['Snapline']['Thickness']
+    snaplineDrawing.Color = Config['Snapline']['Color']
+    snaplineDrawing.ZIndex = 500
+end
+
+-- ========== MAIN LOOP ==========
+RunService.RenderStepped:Connect(function(dt)
+    deltaTime = dt
+
+    -- Self-knockout check
+    if isSelfKnocked() and isLocking then
+        currentTarget = nil
+        isLocking = false
+        lastVisibleTarget = nil
+    end
+
+    -- Triggerbot
+    TriggerBot()
+
+    -- Speed
+    if SpeedEnabled and Config['Speed']['Enabled'] then
+        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+        if humanoid then
+            local targetSpeed = BaseSpeed * Config['Speed']['Multiplier']
+            if humanoid.WalkSpeed ~= targetSpeed then
+                humanoid.WalkSpeed = targetSpeed
+            end
+        end
+        if Config['Speed']['Anti Fling'] then
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local vel = hrp.Velocity
+                if vel.Y > 50 or vel.Y < -50 then
+                    hrp.Velocity = Vector3.new(vel.X, 0, vel.Z)
+                end
+            end
+        end
+    end
+
+    -- Hitbox Expander
+    if Config['Hitbox Expander']['Enabled'] then
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    hrp.Size = Vector3.new(Config['Hitbox Expander']['Size'], Config['Hitbox Expander']['Size'], Config['Hitbox Expander']['Size'])
+                    if Config['Hitbox Expander']['Visualize'] then
+                        hrp.Transparency = 0.7
+                        hrp.BrickColor = BrickColor.new("Really blue")
+                        hrp.Material = "Neon"
+                        hrp.CanCollide = false
+                    else
+                        hrp.Transparency = 1
+                    end
+                end
+            end
+        end
+    end
+
+    -- Spiderman
+    if Config['Spiderman']['Enabled'] then
+        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if humanoid and hrp then
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {LocalPlayer.Character}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+            local directions = {
+                hrp.CFrame.LookVector * 3,
+                hrp.CFrame.RightVector * 3,
+                -hrp.CFrame.RightVector * 3,
+            }
+            local foundWall = false
+            for _, direction in pairs(directions) do
+                local result = Workspace:Raycast(hrp.Position, direction, raycastParams)
+                if result and result.Instance then
+                    foundWall = true
+                    break
+                end
+            end
+            if foundWall then
+                if humanoid:GetState() ~= Enum.HumanoidStateType.Climbing then
+                    humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing, true)
+                    humanoid:ChangeState(Enum.HumanoidStateType.Climbing)
+                end
+                local bodyVelocity = hrp:FindFirstChild("SpidermanVelocity")
+                if not bodyVelocity then
+                    bodyVelocity = Instance.new("BodyVelocity")
+                    bodyVelocity.Name = "SpidermanVelocity"
+                    bodyVelocity.MaxForce = Vector3.new(0, 4000, 0)
+                    bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+                    bodyVelocity.Parent = hrp
+                end
+            else
+                local bodyVelocity = hrp:FindFirstChild("SpidermanVelocity")
+                if bodyVelocity then
+                    bodyVelocity:Destroy()
+                end
+            end
+        end
+    else
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local bodyVelocity = hrp:FindFirstChild("SpidermanVelocity")
+            if bodyVelocity then
+                bodyVelocity:Destroy()
+            end
+        end
+    end
+
+    -- Update FOV circles
+    updateFOVCircles()
+
+    -- Refresh ESP
+    refreshESP()
+
+    -- Snapline
+    if Config['Snapline']['Enabled'] and currentTarget then
+        local targetPart = nil
+        local targetChar = currentTarget.Parent
+        if targetChar then
+            targetPart = targetChar:FindFirstChild(Config['Snapline']['TargetPart'])
+        end
+        if targetPart then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+            if onScreen and screenPos.Z > 0 then
+                local startPos = Vector2.new(Mouse.X, Mouse.Y + Config['Snapline']['MouseOffsetY'])
+                snaplineDrawing.From = startPos
+                snaplineDrawing.To = Vector2.new(screenPos.X, screenPos.Y)
+                snaplineDrawing.Visible = true
+            else
+                snaplineDrawing.Visible = false
+            end
+        else
+            snaplineDrawing.Visible = false
+        end
+    else
+        snaplineDrawing.Visible = false
+    end
+
+    -- Apply Camera Lock
+    applyCameraLock()
+end)
+
+-- ========== INFINITE RANGE (PERSISTENT) ==========
+RunService.Stepped:Connect(function()
+    if not Config['Infinite Range']['Enabled'] or not infRangeActive then return end
+    local character = LocalPlayer.Character
+    if not character then return end
+    local tool = character:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    local rangeProps = {"Range", "MaxRange", "FireRange", "Distance", "MaxDistance"}
+    for _, propName in pairs(rangeProps) do
+        local rangeValue = tool:FindFirstChild(propName)
+        if rangeValue and rangeValue:IsA("NumberValue") then
+            rangeValue.Value = Config['Infinite Range']['Max Range']
+        end
+        local config = tool:FindFirstChild("Configuration") or tool:FindFirstChild("GunConfig")
+        if config then
+            local r = config:FindFirstChild(propName)
+            if r and r:IsA("NumberValue") then
+                r.Value = Config['Infinite Range']['Max Range']
+            end
+        end
+    end
+end)
+
+-- ========== RAPID FIRE ==========
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        rapidFireActive = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        rapidFireActive = false
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not Config['Rapid Fire']['Enabled'] or not rapidFireActive then return end
+    local character = LocalPlayer.Character
+    if not character then return end
+    local tool = character:FindFirstChildOfClass("Tool")
+    if not tool then return end
+    if Config['Rapid Fire']['Specific Weapons']['Enabled'] then
+        local valid = false
+        for _, wName in pairs(Config['Rapid Fire']['Specific Weapons']['Weapons']) do
+            if tool.Name == wName then
+                valid = true
+                break
+            end
+        end
+        if not valid then return end
+    end
+    tool:Activate()
+    task.wait(Config['Rapid Fire']['Delay'])
+end)
+
+-- ========== INPUT HANDLING ==========
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Target Lock']['Key']] then
+        local mode = Config['Keybinds']['Target Lock']['Mode']
+        if mode == 'Toggle' then
+            if Config['Settings']['Target Aim'] then
+                if isLocking then
+                    isLocking = false
+                    currentTarget = nil
+                    lastVisibleTarget = nil
+                else
+                    local target = findClosestTarget()
+                    if target then
+                        currentTarget = target
+                        lastVisibleTarget = target
+                        isLocking = true
+                    end
+                end
+            else
+                isLocking = not isLocking
+            end
+        elseif mode == 'Hold' then
+            if Config['Settings']['Target Aim'] then
+                local target = findClosestTarget()
+                if target then
+                    currentTarget = target
+                    lastVisibleTarget = target
+                    isLocking = true
+                end
+            else
+                isLocking = true
+            end
+        end
+    end
+
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Trigger Bot']['Key']] then
+        local mode = Config['Keybinds']['Trigger Bot']['Mode']
+        if mode == 'Toggle' then
+            triggerEnabled = not triggerEnabled
+        elseif mode == 'Hold' then
+            triggerEnabled = true
+        end
+    end
+
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Speed']] then
+        local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+        if humanoid then
+            if not SpeedEnabled then
+                BaseSpeed = 16
+                SpeedEnabled = true
+            else
+                humanoid.WalkSpeed = BaseSpeed
+                SpeedEnabled = false
+            end
+        end
+    end
+
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['ESP']] then
+        Config['Visual Awareness']['Enabled'] = not Config['Visual Awareness']['Enabled']
+    end
+
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Super Jump']] then
+        superJumpActive = not superJumpActive
+        print("Super Jump: " .. (superJumpActive and "ON" or "OFF"))
+    end
+
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Camera Lock']] then
+        if Config['Camera Lock']['Enabled'] then
+            camlockEnabled = not camlockEnabled
+            camlockTarget = nil
+        end
+    end
+
+    if input.KeyCode == Enum.KeyCode[Config['Infinite Range']['Key']] then
+        infRangeActive = not infRangeActive
+        print("Infinite Range: " .. (infRangeActive and "ON" or "OFF"))
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Target Lock']['Key']] then
+        if Config['Keybinds']['Target Lock']['Mode'] == 'Hold' then
+            isLocking = false
+            currentTarget = nil
+            lastVisibleTarget = nil
+        end
+    end
+    if input.KeyCode == Enum.KeyCode[Config['Keybinds']['Trigger Bot']['Key']] then
+        if Config['Keybinds']['Trigger Bot']['Mode'] == 'Hold' then
+            triggerEnabled = false
+        end
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    -- Reacquire camlock target if it was the same player
+    if camlockTarget and camlockTarget.Character then
+        -- Keep target
+    end
+end)
+
+-- ========== GUI (STATUS TEXT) ==========
+if Config['UI'] and Config['UI']['Enabled'] then
+    local gui = Instance.new("ScreenGui")
+    gui.Parent = game.CoreGui
+    gui.IgnoreGuiInset = true
+
+    local text = Instance.new("TextLabel")
+    text.Parent = gui
+    text.AnchorPoint = Vector2.new(0.5, 1)
+    text.Position = UDim2.new(0.5, 0, 1, -110)
+    text.Size = UDim2.new(0, 260, 0, 180)
+    text.BackgroundTransparency = 1
+    text.TextXAlignment = Enum.TextXAlignment.Center
+    text.TextYAlignment = Enum.TextYAlignment.Bottom
+    text.Font = Enum.Font.Arial
+    text.TextSize = 19
+    text.RichText = true
+    text.TextStrokeTransparency = 0
+    text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+
+    RunService.RenderStepped:Connect(function()
+        local lines = {}
+        table.insert(lines, '<b><font color="rgb(102,178,255)">Xanax.wtf</font></b>')
+
+        if SpeedEnabled then
+            table.insert(lines, '<font color="rgb(255,255,255)">speed-walk</font><font color="rgb(102,178,255)"> [ON]</font>')
+        else
+            table.insert(lines, '<font color="rgb(255,255,255)">speed-walk</font>')
+        end
+
+        if Config["Silent Aim"]["Enabled"] and currentTarget then
+            local targetName = ""
+            local targetChar = currentTarget.Parent
+            if targetChar then
+                local player = Players:GetPlayerFromCharacter(targetChar)
+                if player then
+                    targetName = player.DisplayName ~= "" and player.DisplayName or player.Name
+                end
+            end
+            table.insert(lines, '<font color="rgb(255,255,255)">silent-aim</font><font color="rgb(102,178,255)"> [ ' .. targetName .. ' ]</font>')
+        else
+            table.insert(lines, '<font color="rgb(255,255,255)">silent-aim</font>')
+        end
+
+        if Config["Trigger Bot"]["Enabled"] and triggerEnabled then
+            table.insert(lines, '<font color="rgb(255,255,255)">trigger-bot</font><font color="rgb(102,178,255)"> [ON]</font>')
+        else
+            table.insert(lines, '<font color="rgb(255,255,255)">trigger-bot</font>')
+        end
+
+        if infRangeActive then
+            table.insert(lines, '<font color="rgb(255,255,255)">infinite-range</font><font color="rgb(102,178,255)"> [ON]</font>')
+        else
+            table.insert(lines, '<font color="rgb(255,255,255)">infinite-range</font>')
+        end
+
+        if camlockEnabled then
+            local name = camlockTarget and (camlockTarget.DisplayName ~= "" and camlockTarget.DisplayName or camlockTarget.Name) or "none"
+            table.insert(lines, '<font color="rgb(255,255,255)">camlock</font><font color="rgb(102,178,255)"> [' .. name .. ']</font>')
+        else
+            table.insert(lines, '<font color="rgb(255,255,255)">camlock</font>')
+        end
+
+        text.Text = table.concat(lines, "\n")
+    end)
+end
+
+-- ========================================================================
+-- [[ END OF SCRIPT ]]
+-- ========================================================================
